@@ -1,0 +1,58 @@
+{
+  "3": {
+    "accountNum": 3,
+    "email": "test3@raky.es",
+    "cookie": "",
+    "senderId": "3721617c-10ea-4c51-90f0-3aa375ec0f52",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "4": {
+    "accountNum": 4,
+    "email": "test4@raky.es",
+    "cookie": "",
+    "senderId": "bc397f52-1658-4909-9d2d-c322e198de6b",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "5": {
+    "accountNum": 5,
+    "email": "test5@raky.es",
+    "cookie": "",
+    "senderId": "fd94f8e1-74bd-41a8-b7c5-a930d2db9c3f",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "6": {
+    "accountNum": 6,
+    "email": "test6@raky.es",
+    "cookie": "",
+    "senderId": "b5e7cd53-17bd-4510-aa44-9b31c3697212",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "7": {
+    "accountNum": 7,
+    "email": "test7@raky.es",
+    "cookie": "",
+    "senderId": "db616250-96b6-448b-a6c5-db8da0ba24e4",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "8": {
+    "accountNum": 8,
+    "email": "test8@raky.es",
+    "cookie": "",
+    "senderId": "e0be773b-4ffb-4d9e-9584-8e8de24cc94b",
+    "lastRefresh": 0,
+    "failedAt": 0
+  },
+  "9": {
+    "accountNum": 9,
+    "email": "test9@raky.es",
+    "cookie": "",
+    "senderId": "0a06a15d-fdb7-4a87-8ff4-8e071ebb166c",
+    "lastRefresh": 0,
+    "failedAt": 0
+  }
+}
