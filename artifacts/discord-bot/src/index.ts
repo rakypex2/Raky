@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { startAngelBot } from "./selfbot.js";
+import { startTelegram } from "./telegram.js";
 
 const PORT = process.env.PORT ?? "8080";
 
@@ -16,3 +17,4 @@ process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", 
 process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
 
 startAngelBot();
+startTelegram();
