@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "discord.js-selfbot-v13": "^3.7.1",
     "telegraf": "^4.16.3",
     "ws": "^8.18.2"
   },
