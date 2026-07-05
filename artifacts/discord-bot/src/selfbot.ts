@@ -73,9 +73,8 @@ function splitByBlankLines(text: string): string[] {
 }
 
 async function sendTypingIndicator(token: string, channelId: string): Promise<void> {
-  await fetch(`${DISCORD_API}/channels/${channelId}/typing`, {
+  await discordFetch(token, `${DISCORD_API}/channels/${channelId}/typing`, {
     method: "POST",
-    headers: { Authorization: token, "User-Agent": "Mozilla/5.0" },
   }).catch(() => {});
 }
 
@@ -91,6 +90,36 @@ function startTyping(token: string, channelId: string): () => void {
   return () => { active = false; };
 }
 
+async function discordFetch(
+  token: string,
+  url: string,
+  init: RequestInit,
+  retries = 4
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: token,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ...(init.headers as Record<string, string> ?? {}),
+      },
+    });
+    if (res.status === 429) {
+      const retryAfter =
+        parseFloat(res.headers.get("Retry-After") ?? "5") * 1000;
+      const wait = Math.max(retryAfter, 1000);
+      console.warn(`[selfbot] ⏳ Rate limit 429 — esperando ${Math.round(wait / 1000)}s...`);
+      await new Promise((r) => setTimeout(r, wait));
+      attempt++;
+      if (attempt >= retries) return res;
+      continue;
+    }
+    return res;
+  }
+}
+
 async function sendDiscordMessage(
   token: string,
   channelId: string,
@@ -102,15 +131,15 @@ async function sendDiscordMessage(
     body.message_reference = { message_id: replyToMessageId };
     body.allowed_mentions  = { replied_user: false };
   }
-  const res = await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: token,
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: JSON.stringify(body),
-  });
+  const res = await discordFetch(
+    token,
+    `${DISCORD_API}/channels/${channelId}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     console.error(`[selfbot] Error enviando mensaje HTTP ${res.status}: ${txt.slice(0, 200)}`);
