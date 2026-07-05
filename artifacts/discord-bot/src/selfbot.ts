@@ -4,7 +4,7 @@ import { getAnyWorkingAccount } from "./cookies.js";
 import { loadRoom, saveRoom } from "./roomConfig.js";
 import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 
-const SHAPE_USERNAME = "gatorchat";
+const SHAPE_USERNAME = "mateoia";
 const DISCORD_API = "https://discord.com/api/v10";
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 
@@ -51,7 +51,7 @@ async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
 
   const { roomId, accountNum } = await createShapesRoom(
     info.accountNum,
-    `GatorchatBot — sala principal`,
+    `Mateoia — sala principal`,
     SHAPE_USERNAME
   );
   saveRoom({ roomId, accountNum });
