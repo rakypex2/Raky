@@ -2,9 +2,9 @@
   "3": {
     "accountNum": 3,
     "email": "test3@raky.es",
-    "cookie": "",
+    "cookie": "__Secure-better-auth.session_token=j5FAWnf23TTNNlj1AkQCZDfgSG13pRlP.zoxIb%2FDXNjdVLf1JvcTaph1OSazVHBRm7IQPUKPiy%2FE%3D",
     "senderId": "3721617c-10ea-4c51-90f0-3aa375ec0f52",
-    "lastRefresh": 0,
+    "lastRefresh": 1783261093859,
     "failedAt": 0
   },
   "4": {

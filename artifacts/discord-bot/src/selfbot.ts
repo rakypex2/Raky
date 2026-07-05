@@ -5,6 +5,7 @@ import { loadRoom, saveRoom } from "./roomConfig.js";
 import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 
 const SHAPE_USERNAME = "mateoia";
+const BOT_NAMES = ["mateoia", "mateo.ia", "mateo"];
 const DISCORD_API = "https://discord.com/api/v10";
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 
@@ -147,7 +148,11 @@ async function handleMessage(
     if (msg.author?.id === userId) return;
     if (!rawContent) return;
 
-    const mentioned = rawContent.includes(`<@${userId}>`) || rawContent.includes(`<@!${userId}>`);
+    const rawLower = rawContent.toLowerCase();
+    const mentioned =
+      rawContent.includes(`<@${userId}>`) ||
+      rawContent.includes(`<@!${userId}>`) ||
+      BOT_NAMES.some((name) => rawLower.includes(name));
     let isReplyToMe = false;
     if (msg.referenced_message) {
       isReplyToMe = msg.referenced_message?.author?.id === userId;
@@ -155,21 +160,32 @@ async function handleMessage(
     const shouldRespond = isDM || mentioned || isReplyToMe;
 
     console.log(
-      `[selfbot] 📨 Mensaje de ${authorName} en ${isDM ? "DM" : `#${channelCache.get(channelId) ?? channelId}`}` +
+      `[selfbot] 📨 ${isDM ? "DM" : `#${channelCache.get(channelId) ?? channelId}`} de ${authorName}` +
       ` | mencionado=${mentioned} replyToMe=${isReplyToMe} DM=${isDM} → responder=${shouldRespond}`
     );
 
-    const cleanText = rawContent
+    let cleanText = rawContent
       .replace(new RegExp(`<@!?${userId}>`, "g"), "")
       .trim();
+    for (const name of BOT_NAMES) {
+      cleanText = cleanText.replace(new RegExp(name, "gi"), "").trim();
+    }
 
-    if (!cleanText) return;
+    if (!cleanText && !shouldRespond) return;
+    if (!cleanText) cleanText = rawContent.trim();
 
     addToHistory(channelId, authorName, cleanText);
 
     if (!shouldRespond) return;
 
-    if (cleanText.toLowerCase() === "!reset" || cleanText.toLowerCase() === "!reiniciar") {
+    const lowerClean = cleanText.toLowerCase();
+
+    if (lowerClean === "!ping") {
+      await sendDiscordMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
+      return;
+    }
+
+    if (lowerClean === "!reset" || lowerClean === "!reiniciar") {
       clearHistory(channelId);
       await sendDiscordMessage(token, channelId, "🔄 Historial del canal reiniciado.", msg.id);
       return;
