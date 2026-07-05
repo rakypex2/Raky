@@ -5,7 +5,7 @@ import { getAnyWorkingAccount } from "./cookies.js";
 import { loadRoom, saveRoom } from "./roomConfig.js";
 import { addToHistory, getHistory } from "./messageHistory.js";
 
-const SHAPE_USERNAME = "angel-mm39";
+const SHAPE_USERNAME = "mateoia";
 
 function sanitize(text: string): string {
   return text.replace(/\|\|([^|]+)\|\|/g, "$1");

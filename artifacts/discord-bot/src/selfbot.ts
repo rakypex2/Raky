@@ -4,7 +4,7 @@ import { getAnyWorkingAccount } from "./cookies.js";
 import { loadRoom, saveRoom } from "./roomConfig.js";
 import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 
-const SHAPE_USERNAME = "angel-mm39";
+const SHAPE_USERNAME = "mateoia";
 const DISCORD_API = "https://discord.com/api/v10";
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 
@@ -359,5 +359,5 @@ export function startAngelBot(): void {
   }
   const bot = new AngelSelfbot(token);
   bot.start();
-  console.log("[selfbot] 😇 AngelBot iniciado con shape angel-mm39");
+  console.log("[selfbot] 😇 Mateo iniciado con shape mateoia");
 }
