@@ -4,10 +4,12 @@ import { getAnyWorkingAccount } from "./cookies.js";
 import { loadRoom, saveRoom } from "./roomConfig.js";
 import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 
-const SHAPE_USERNAME = "mateoia";
-const BOT_NAMES = ["mateoia", "mateo.ia", "mateo"];
+const SHAPE_USERNAME = "gatorchat";
 const DISCORD_API = "https://discord.com/api/v10";
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
+
+// Si no llega ningún evento en 90s, reconectamos
+const WATCHDOG_MS = 90_000;
 
 const channelQueues = new Map<string, Promise<void>>();
 
@@ -41,10 +43,7 @@ function splitIntoChunks(text: string, size = 1900): string[] {
 
 async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
   const existing = loadRoom();
-  if (existing) {
-    console.log(`[selfbot] Usando sala existente: ${existing.roomId}`);
-    return existing;
-  }
+  if (existing) return existing;
 
   console.log(`[selfbot] Creando sala única para ${SHAPE_USERNAME}...`);
   const info = await getAnyWorkingAccount();
@@ -52,18 +51,17 @@ async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
 
   const { roomId, accountNum } = await createShapesRoom(
     info.accountNum,
-    `AngelBot — sala principal`,
+    `GatorchatBot — sala principal`,
     SHAPE_USERNAME
   );
-  const config = { roomId, accountNum };
-  saveRoom(config);
-  return config;
+  saveRoom({ roomId, accountNum });
+  return { roomId, accountNum };
 }
 
 async function sendTyping(token: string, channelId: string): Promise<void> {
   await fetch(`${DISCORD_API}/channels/${channelId}/typing`, {
     method: "POST",
-    headers: { Authorization: token, "User-Agent": "AngelBot/1.0" },
+    headers: { Authorization: token, "User-Agent": "GatorchatBot/1.0" },
   }).catch(() => {});
 }
 
@@ -95,7 +93,7 @@ async function sendDiscordMessage(
     headers: {
       Authorization: token,
       "Content-Type": "application/json",
-      "User-Agent": "AngelBot/1.0",
+      "User-Agent": "GatorchatBot/1.0",
     },
     body: JSON.stringify(body),
   });
@@ -115,17 +113,12 @@ function buildContextMessage(
 ): string {
   const lines: string[] = [];
   lines.push(`[${locationLine}]`);
-
   if (history.length > 0) {
     lines.push(`[Últimos ${history.length} mensajes del canal:]`);
-    for (const h of history) {
-      lines.push(`${h.username}: ${h.content}`);
-    }
+    for (const h of history) lines.push(`${h.username}: ${h.content}`);
   }
-
   lines.push(`[Mensaje actual de ${authorName}:]`);
   lines.push(messageText);
-
   return lines.join("\n");
 }
 
@@ -143,20 +136,14 @@ async function handleMessage(
     const guildId: string | null = msg.guild_id ?? null;
     const isDM = !guildId;
 
-    // Filtrar bots y mensajes propios
     if (msg.author?.bot) return;
     if (msg.author?.id === userId) return;
     if (!rawContent) return;
 
-    const rawLower = rawContent.toLowerCase();
     const mentioned =
       rawContent.includes(`<@${userId}>`) ||
-      rawContent.includes(`<@!${userId}>`) ||
-      BOT_NAMES.some((name) => rawLower.includes(name));
-    let isReplyToMe = false;
-    if (msg.referenced_message) {
-      isReplyToMe = msg.referenced_message?.author?.id === userId;
-    }
+      rawContent.includes(`<@!${userId}>`);
+    const isReplyToMe = msg.referenced_message?.author?.id === userId;
     const shouldRespond = isDM || mentioned || isReplyToMe;
 
     console.log(
@@ -164,15 +151,9 @@ async function handleMessage(
       ` | mencionado=${mentioned} replyToMe=${isReplyToMe} DM=${isDM} → responder=${shouldRespond}`
     );
 
-    let cleanText = rawContent
+    const cleanText = rawContent
       .replace(new RegExp(`<@!?${userId}>`, "g"), "")
-      .trim();
-    for (const name of BOT_NAMES) {
-      cleanText = cleanText.replace(new RegExp(name, "gi"), "").trim();
-    }
-
-    if (!cleanText && !shouldRespond) return;
-    if (!cleanText) cleanText = rawContent.trim();
+      .trim() || rawContent.trim();
 
     addToHistory(channelId, authorName, cleanText);
 
@@ -180,12 +161,12 @@ async function handleMessage(
 
     const lowerClean = cleanText.toLowerCase();
 
-    if (lowerClean === "!ping") {
+    if (lowerClean === "r!ping") {
       await sendDiscordMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
       return;
     }
 
-    if (lowerClean === "!reset" || lowerClean === "!reiniciar") {
+    if (lowerClean === "r!reset" || lowerClean === "r!reiniciar") {
       clearHistory(channelId);
       await sendDiscordMessage(token, channelId, "🔄 Historial del canal reiniciado.", msg.id);
       return;
@@ -208,11 +189,10 @@ async function handleMessage(
       cleanText
     );
 
-    console.log(`[selfbot] 📤 Enviando a shapes (sala: ${(await ensureRoom()).roomId.slice(0, 8)}...)...`);
-
     const stopTyping = startTyping(token, channelId);
     try {
       const { roomId, accountNum } = await ensureRoom();
+      console.log(`[selfbot] 📤 Enviando a shapes (sala: ${roomId.slice(0, 8)}...)...`);
       const sentAt = Date.now();
 
       await sendShapesMessage(accountNum, roomId, contextPayload, authorName, SHAPE_USERNAME);
@@ -248,12 +228,15 @@ async function handleMessage(
   }
 }
 
-export class AngelSelfbot {
+export class GatorchatSelfbot {
   private token: string;
   private ws: WebSocket | null = null;
   private userId: string | null = null;
-  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private sequence: number | null = null;
+  private sessionId: string | null = null;
+  private resumeGatewayUrl: string | null = null;
   private stopped = false;
   private guildCache = new Map<string, string>();
   private channelCache = new Map<string, string>();
@@ -263,33 +246,64 @@ export class AngelSelfbot {
   }
 
   start(): void {
-    this.connect();
+    this.connect(false);
   }
 
   stop(): void {
     this.stopped = true;
-    if (this.heartbeat) clearInterval(this.heartbeat);
-    this.ws?.close();
+    this.clearTimers();
+    this.ws?.close(1000, "stopped");
   }
 
-  private connect(): void {
-    if (this.stopped) return;
-    console.log("[selfbot] Conectando al gateway de Discord...");
-    this.ws = new WebSocket(GATEWAY_URL);
+  private clearTimers(): void {
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.watchdogTimer) { clearTimeout(this.watchdogTimer); this.watchdogTimer = null; }
+  }
 
-    this.ws.on("open", () => console.log("[selfbot] WebSocket conectado"));
+  private resetWatchdog(): void {
+    if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+    this.watchdogTimer = setTimeout(() => {
+      console.warn(`[selfbot] 🐕 Watchdog: sin eventos en ${WATCHDOG_MS / 1000}s. Reconectando...`);
+      this.ws?.close(4000, "watchdog");
+    }, WATCHDOG_MS);
+  }
+
+  private connect(resume: boolean): void {
+    if (this.stopped) return;
+
+    const url = resume && this.resumeGatewayUrl
+      ? `${this.resumeGatewayUrl}?v=10&encoding=json`
+      : GATEWAY_URL;
+
+    console.log(`[selfbot] ${resume ? "Resumiendo" : "Conectando"} al gateway: ${url.slice(0, 50)}...`);
+    this.ws = new WebSocket(url);
+
+    this.ws.on("open", () => {
+      console.log("[selfbot] WebSocket conectado");
+      this.resetWatchdog();
+    });
 
     this.ws.on("message", (data: WebSocket.Data) => {
       try {
         const payload = JSON.parse(data.toString());
-        this.handlePayload(payload);
+        this.resetWatchdog();
+        this.handlePayload(payload, resume);
       } catch {}
     });
 
     this.ws.on("close", (code, reason) => {
-      console.warn(`[selfbot] Gateway cerrado: código=${code} razón=${reason}. Reconectando en 5s...`);
-      if (this.heartbeat) clearInterval(this.heartbeat);
-      if (!this.stopped) setTimeout(() => this.connect(), 5000);
+      const reasonStr = reason?.toString() || "";
+      console.warn(`[selfbot] Gateway cerrado: código=${code} razón="${reasonStr}"`);
+      this.clearTimers();
+
+      if (this.stopped) return;
+
+      // Códigos que no permiten resume
+      const noResumeCodes = [4004, 4010, 4011, 4012, 4013, 4014];
+      const canResume = !noResumeCodes.includes(code) && !!this.sessionId;
+
+      const delay = code === 4000 ? 1000 : 5000;
+      setTimeout(() => this.connect(canResume), delay);
     });
 
     this.ws.on("error", (err) => {
@@ -301,6 +315,20 @@ export class AngelSelfbot {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(payload));
     }
+  }
+
+  private sendHeartbeat(): void {
+    this.send({ op: 1, d: this.sequence });
+  }
+
+  private startHeartbeat(intervalMs: number): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    // Jitter inicial para evitar sincronizar con el servidor
+    const jitter = Math.random() * intervalMs;
+    setTimeout(() => {
+      this.sendHeartbeat();
+      this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), intervalMs);
+    }, jitter);
   }
 
   private identify(): void {
@@ -333,26 +361,64 @@ export class AngelSelfbot {
     });
   }
 
-  private handlePayload(payload: any): void {
+  private resume(): void {
+    if (!this.sessionId || this.sequence === null) {
+      console.warn("[selfbot] No hay sesión para resumir, haciendo identify...");
+      this.identify();
+      return;
+    }
+    console.log(`[selfbot] Enviando RESUME (seq=${this.sequence})...`);
+    this.send({
+      op: 6,
+      d: {
+        token: this.token,
+        session_id: this.sessionId,
+        seq: this.sequence,
+      },
+    });
+  }
+
+  private handlePayload(payload: any, isResume: boolean): void {
     const { op, d, s, t } = payload;
     if (s !== undefined && s !== null) this.sequence = s;
 
     switch (op) {
       case 10: {
-        const interval: number = d.heartbeat_interval;
-        if (this.heartbeat) clearInterval(this.heartbeat);
-        this.heartbeat = setInterval(() => {
-          this.send({ op: 1, d: this.sequence });
-        }, interval);
-        this.send({ op: 1, d: this.sequence });
-        this.identify();
+        // Hello — servidor indica intervalo de heartbeat
+        this.startHeartbeat(d.heartbeat_interval);
+        if (isResume && this.sessionId) {
+          this.resume();
+        } else {
+          this.identify();
+        }
         break;
       }
       case 11:
+        // Heartbeat ACK — OK
+        break;
+      case 1:
+        // Servidor pide heartbeat inmediato
+        this.sendHeartbeat();
+        break;
+      case 7:
+        // Reconnect — Discord pide que reconectemos con resume
+        console.warn("[selfbot] Op 7 Reconnect recibido. Reconectando con resume...");
+        this.ws?.close(4000, "op7-reconnect");
+        break;
+      case 9:
+        // Invalid Session — d=true se puede resumir, d=false hay que re-identify
+        console.warn(`[selfbot] Op 9 Invalid Session (resumable=${d}). Reconectando...`);
+        if (!d) {
+          this.sessionId = null;
+          this.sequence = null;
+        }
+        setTimeout(() => this.ws?.close(4000, "invalid-session"), 1000 + Math.random() * 4000);
         break;
       case 0: {
         if (t === "READY") {
           this.userId = d.user?.id ?? null;
+          this.sessionId = d.session_id ?? null;
+          this.resumeGatewayUrl = d.resume_gateway_url ?? null;
           console.log(
             `[selfbot] ✅ Conectado como ${d.user?.username}#${d.user?.discriminator} (${this.userId})`
           );
@@ -361,13 +427,12 @@ export class AngelSelfbot {
           for (const g of guilds) {
             if (g.id && g.name) this.guildCache.set(g.id, g.name);
             for (const ch of g.channels ?? []) {
-              if (ch.id && ch.name) {
-                this.channelCache.set(ch.id, ch.name);
-                totalChannels++;
-              }
+              if (ch.id && ch.name) { this.channelCache.set(ch.id, ch.name); totalChannels++; }
             }
           }
           console.log(`[selfbot] 📋 Cacheados ${guilds.length} servidores y ${totalChannels} canales`);
+        } else if (t === "RESUMED") {
+          console.log(`[selfbot] ✅ Sesión resumida correctamente (seq=${this.sequence})`);
         } else if (t === "GUILD_CREATE") {
           if (d.id && d.name) this.guildCache.set(d.id, d.name);
           for (const ch of d.channels ?? []) {
@@ -376,22 +441,13 @@ export class AngelSelfbot {
         } else if (t === "CHANNEL_CREATE" || t === "CHANNEL_UPDATE") {
           if (d.id && d.name) this.channelCache.set(d.id, d.name);
         } else if (t === "MESSAGE_CREATE") {
-          if (!this.userId) {
-            console.warn("[selfbot] MESSAGE_CREATE recibido antes de READY, ignorando");
-            return;
-          }
+          if (!this.userId) return;
           queueForChannel(d.channel_id, () =>
             handleMessage(this.token, this.userId!, d, this.guildCache, this.channelCache)
           );
         }
         break;
       }
-      case 9:
-        console.warn("[selfbot] Sesión inválida. Reconectando...");
-        setTimeout(() => this.identify(), 2000);
-        break;
-      default:
-        break;
     }
   }
 }
@@ -402,7 +458,7 @@ export function startAngelBot(): void {
     console.error("[selfbot] ❌ ANGEL_SELFBOT_TOKEN no definido. El bot no puede iniciar.");
     process.exit(1);
   }
-  const bot = new AngelSelfbot(token);
+  const bot = new GatorchatSelfbot(token);
   bot.start();
-  console.log(`[selfbot] 😇 Mateo iniciado con shape ${SHAPE_USERNAME}`);
+  console.log(`[selfbot] 🐊 Bot iniciado con shape ${SHAPE_USERNAME}`);
 }

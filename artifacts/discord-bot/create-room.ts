@@ -2,7 +2,7 @@ import { getAnyWorkingAccount } from "./src/cookies.js";
 import { createShapesRoom } from "./src/shapes.js";
 import { saveRoom, loadRoom } from "./src/roomConfig.js";
 
-const SHAPE_USERNAME = "mateoia";
+const SHAPE_USERNAME = "gatorchat";
 
 const existing = loadRoom();
 if (existing) {
@@ -20,7 +20,7 @@ if (!info) {
 
 const { roomId, accountNum } = await createShapesRoom(
   info.accountNum,
-  "AngelBot — sala principal",
+  "GatorchatBot — sala principal",
   SHAPE_USERNAME
 );
 
