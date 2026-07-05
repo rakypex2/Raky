@@ -140,6 +140,26 @@ async function handleMessage(
     if (msg.author?.id === userId) return;
     if (!rawContent) return;
 
+    const channelLabel = isDM ? "DM" : `#${channelCache.get(channelId) ?? channelId}`;
+    console.log(`[selfbot] 📨 ${channelLabel} de ${authorName} | raw: "${rawContent.slice(0, 80)}"`);
+
+    const cleanText = rawContent
+      .replace(new RegExp(`<@!?${userId}>`, "g"), "")
+      .trim() || rawContent.trim();
+
+    const lowerClean = cleanText.toLowerCase();
+
+    // Comandos R! — funcionan siempre, sin necesitar mención
+    if (lowerClean === "r!ping") {
+      await sendDiscordMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
+      return;
+    }
+    if (lowerClean === "r!reset" || lowerClean === "r!reiniciar") {
+      clearHistory(channelId);
+      await sendDiscordMessage(token, channelId, "🔄 Historial del canal reiniciado.", msg.id);
+      return;
+    }
+
     const mentioned =
       rawContent.includes(`<@${userId}>`) ||
       rawContent.includes(`<@!${userId}>`);
@@ -147,30 +167,12 @@ async function handleMessage(
     const shouldRespond = isDM || mentioned || isReplyToMe;
 
     console.log(
-      `[selfbot] 📨 ${isDM ? "DM" : `#${channelCache.get(channelId) ?? channelId}`} de ${authorName}` +
-      ` | mencionado=${mentioned} replyToMe=${isReplyToMe} DM=${isDM} → responder=${shouldRespond}`
+      `[selfbot] → mencionado=${mentioned} replyToMe=${isReplyToMe} DM=${isDM} → responder=${shouldRespond}`
     );
-
-    const cleanText = rawContent
-      .replace(new RegExp(`<@!?${userId}>`, "g"), "")
-      .trim() || rawContent.trim();
 
     addToHistory(channelId, authorName, cleanText);
 
     if (!shouldRespond) return;
-
-    const lowerClean = cleanText.toLowerCase();
-
-    if (lowerClean === "r!ping") {
-      await sendDiscordMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
-      return;
-    }
-
-    if (lowerClean === "r!reset" || lowerClean === "r!reiniciar") {
-      clearHistory(channelId);
-      await sendDiscordMessage(token, channelId, "🔄 Historial del canal reiniciado.", msg.id);
-      return;
-    }
 
     let locationLine: string;
     if (isDM) {
