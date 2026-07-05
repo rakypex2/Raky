@@ -1,0 +1,315 @@
+import WebSocket from "ws";
+import {
+  createShapesRoom,
+  sendShapesMessage,
+  pollShapesReply,
+} from "./shapes.js";
+import { getOrFetchRoom, setRoom, deleteRoom } from "./gdocs.js";
+import { getAccountForChannel } from "./database.js";
+import { addToHistory, buildPayload, clearHistory } from "./messageHistory.js";
+
+const channelQueues = new Map<string, Promise<void>>();
+
+function queueForChannel(channelId: string, fn: () => Promise<void>): void {
+  const prev = channelQueues.get(channelId) ?? Promise.resolve();
+  const next = prev.then(() => fn()).catch(() => {});
+  channelQueues.set(channelId, next);
+  next.finally(() => {
+    if (channelQueues.get(channelId) === next) channelQueues.delete(channelId);
+  });
+}
+
+const GATORR_SHAPE  = "gatorchat";
+const GATORR_PREFIX = "gatorchat:";
+const DISCORD_API   = "https://discord.com/api/v10";
+const GATEWAY_URL   = "wss://gateway.discord.gg/?v=10&encoding=json";
+
+function sanitizeReply(text: string): string {
+  return text.replace(/\|\|([^|]+)\|\|/g, "$1");
+}
+
+function splitByBlankLines(text: string): string[] {
+  return text
+    .split(/\n{2,}/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+async function sendTypingIndicator(token: string, channelId: string): Promise<void> {
+  await fetch(`${DISCORD_API}/channels/${channelId}/typing`, {
+    method: "POST",
+    headers: { Authorization: token, "User-Agent": "GatorrBot/1.0" },
+  }).catch(() => {});
+}
+
+function startTyping(token: string, channelId: string): () => void {
+  let active = true;
+  const tick = async () => {
+    while (active) {
+      await sendTypingIndicator(token, channelId);
+      await new Promise((r) => setTimeout(r, 8000));
+    }
+  };
+  tick();
+  return () => { active = false; };
+}
+
+async function sendDiscordMessage(
+  token: string,
+  channelId: string,
+  content: string,
+  replyToMessageId?: string
+): Promise<void> {
+  const body: Record<string, any> = { content };
+  if (replyToMessageId) {
+    body.message_reference = { message_id: replyToMessageId };
+    body.allowed_mentions  = { replied_user: false };
+  }
+  const res = await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: token,
+      "Content-Type": "application/json",
+      "User-Agent": "GatorrBot/1.0",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    console.error(`[gatorr] Error enviando mensaje HTTP ${res.status}: ${txt.slice(0, 200)}`);
+  }
+}
+
+async function handleMessage(
+  token: string,
+  userId: string,
+  msg: any
+): Promise<void> {
+  try {
+    const content: string = (msg.content ?? "").trim();
+    if (!content) return;
+    if (msg.author?.bot) return;
+    if (msg.author?.id === userId) return;
+
+    const channelId: string = msg.channel_id;
+    const guildId:   string | null = msg.guild_id ?? null;
+    const isDM       = !guildId;
+    const mentioned  = content.includes(`<@${userId}>`) || content.includes(`<@!${userId}>`);
+
+    let isReplyToMe = false;
+    if (!isDM && !mentioned && msg.referenced_message) {
+      isReplyToMe = msg.referenced_message?.author?.id === userId;
+    }
+
+    const GREETING_REGEX = /^(holis|holi|hola|buenas)[!¡.,~\s]*$/i;
+    const isGreeting = content.length <= 12 && GREETING_REGEX.test(content);
+    const isGatorrChannel = channelId === "1414641901621215334";
+
+    const cleanText = content
+      .replace(new RegExp(`<@!?${userId}>`, "g"), "")
+      .trim();
+
+    if (!cleanText) return;
+
+    // Registrar en historial todos los mensajes (también los que no se responden)
+    addToHistory(channelId, msg.author?.username ?? "user", cleanText);
+
+    if (!isDM && !mentioned && !isReplyToMe && !isGreeting && !isGatorrChannel) return;
+
+    if (cleanText.toLowerCase() === "!reset" || cleanText.toLowerCase() === "!reiniciar") {
+      deleteRoom(GATORR_PREFIX + channelId);
+      clearHistory(channelId);
+      await sendDiscordMessage(token, channelId, "🔄 Memoria de Gatorr reiniciada.", msg.id);
+      return;
+    }
+
+    const label = isDM
+      ? `DM ${msg.author?.username ?? "user"}`
+      : `Gatorr/#${channelId}`;
+
+    const channelKey = GATORR_PREFIX + channelId;
+
+    let existing = await getOrFetchRoom(channelKey);
+    if (!existing) {
+      const acctNum = getAccountForChannel(channelId, guildId ?? undefined);
+      const { roomId, accountNum } = await createShapesRoom(acctNum, `Discord: ${label}`, GATORR_SHAPE);
+      setRoom(channelKey, roomId, accountNum);
+      existing = { roomId, accountNum };
+    }
+
+    const { roomId, accountNum } = existing;
+
+    const WACK_USER_ID = "1387432333610586275";
+    const finalText =
+      msg.author?.id === WACK_USER_ID && cleanText.includes("!wack")
+        ? "!wack"
+        : cleanText;
+
+    const author = msg.author?.username ?? "user";
+    const payload = buildPayload(channelId, author, finalText);
+    const stopTyping = startTyping(token, channelId);
+    try {
+      const sentAt = Date.now();
+      await sendShapesMessage(accountNum, roomId, payload, author, GATORR_SHAPE);
+      const replies = await pollShapesReply(accountNum, roomId, sentAt);
+      stopTyping();
+
+      if (replies.length === 0) {
+        await sendDiscordMessage(token, channelId, "⚠️ Gatorr no respondió a tiempo.", msg.id);
+        return;
+      }
+
+      let first = true;
+      const allReplies: string[] = [];
+
+      for (const raw of replies) {
+        const blocks = splitByBlankLines(sanitizeReply(raw));
+        const chunks = blocks.length > 0 ? blocks : [sanitizeReply(raw).trim()];
+        for (const block of chunks) {
+          if (!block) continue;
+          allReplies.push(block);
+          const parts = block.match(/.{1,2000}/gs) ?? [block];
+          for (const part of parts) {
+            await sendDiscordMessage(token, channelId, part, first ? msg.id : undefined);
+            first = false;
+          }
+          await new Promise((r) => setTimeout(r, 350));
+        }
+      }
+
+      addToHistory(channelId, "Gatorr", allReplies.join(" ").slice(0, 300));
+    } finally {
+      stopTyping();
+    }
+  } catch (err) {
+    console.error("[gatorr] Error procesando mensaje:", err);
+  }
+}
+
+class GatorrSelfbot {
+  private token:     string;
+  private ws:        WebSocket | null = null;
+  private userId:    string | null    = null;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private sequence:  number | null    = null;
+  private stopped    = false;
+
+  constructor(token: string) {
+    this.token = token;
+  }
+
+  start(): void {
+    this.connect();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.ws?.close();
+  }
+
+  private connect(): void {
+    if (this.stopped) return;
+    console.log("[gatorr] Conectando al gateway de Discord...");
+    this.ws = new WebSocket(GATEWAY_URL);
+
+    this.ws.on("open", () => console.log("[gatorr] WebSocket conectado"));
+
+    this.ws.on("message", (data: WebSocket.Data) => {
+      try {
+        const payload = JSON.parse(data.toString());
+        this.handlePayload(payload);
+      } catch {}
+    });
+
+    this.ws.on("close", (code, reason) => {
+      console.warn(`[gatorr] Gateway cerrado: ${code} ${reason}. Reconectando en 5s...`);
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      if (!this.stopped) setTimeout(() => this.connect(), 5000);
+    });
+
+    this.ws.on("error", (err) => {
+      console.error("[gatorr] WebSocket error:", err.message);
+    });
+  }
+
+  private send(payload: object): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(payload));
+    }
+  }
+
+  private identify(): void {
+    this.send({
+      op: 2,
+      d: {
+        token: this.token,
+        capabilities: 8189,
+        properties: {
+          os: "Windows",
+          browser: "Chrome",
+          device: "",
+          system_locale: "es-ES",
+          browser_user_agent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          browser_version: "120.0.0.0",
+          os_version: "10",
+          referrer: "",
+          referring_domain: "",
+          referrer_current: "",
+          referring_domain_current: "",
+          release_channel: "stable",
+          client_build_number: 0,
+          client_event_source: null,
+        },
+        presence: { status: "online", since: 0, activities: [], afk: false },
+        compress: false,
+        client_state: { guild_versions: {} },
+      },
+    });
+  }
+
+  private handlePayload(payload: any): void {
+    const { op, d, s, t } = payload;
+    if (s !== undefined && s !== null) this.sequence = s;
+
+    switch (op) {
+      case 10: {
+        const interval: number = d.heartbeat_interval;
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = setInterval(() => {
+          this.send({ op: 1, d: this.sequence });
+        }, interval);
+        this.send({ op: 1, d: this.sequence });
+        this.identify();
+        break;
+      }
+      case 11:
+        break;
+      case 0: {
+        if (t === "READY") {
+          this.userId = d.user?.id ?? null;
+          console.log(`[gatorr] ✅ Selfbot conectado como ${d.user?.username}#${d.user?.discriminator} (${this.userId})`);
+        } else if (t === "MESSAGE_CREATE" && this.userId) {
+          queueForChannel(d.channel_id, () => handleMessage(this.token, this.userId!, d));
+        }
+        break;
+      }
+      case 9:
+        console.warn("[gatorr] Sesión inválida. Reconectando...");
+        setTimeout(() => this.identify(), 2000);
+        break;
+    }
+  }
+}
+
+export function startGatorr(): void {
+  const token = process.env.GATORR_SELFBOT_TOKEN;
+  if (!token) {
+    console.warn("[gatorr] ⚠️  GATORR_SELFBOT_TOKEN no definido. Selfbot de Gatorr desactivado.");
+    return;
+  }
+  const bot = new GatorrSelfbot(token);
+  bot.start();
+  console.log("[gatorr] 🐊 Selfbot de Gatorr iniciado");
+}

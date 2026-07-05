@@ -1,18 +1,33 @@
 import WebSocket from "ws";
-import { sendShapesMessage, pollShapesReply } from "./shapes.js";
+import {
+  createShapesRoom,
+  sendShapesMessage,
+  pollShapesReply,
+} from "./shapes.js";
 import { loadRoom, saveRoom } from "./roomConfig.js";
-import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 import { getAnyWorkingAccount } from "./cookies.js";
-import { createShapesRoom } from "./shapes.js";
-
-const SHAPE_USERNAME = "mateoia";
-
-// Intents: GUILDS(1) | GUILD_MESSAGES(512) | GUILD_MESSAGE_REACTIONS(1024)
-//          | DIRECT_MESSAGES(4096) | DIRECT_MESSAGE_REACTIONS(8192) | MESSAGE_CONTENT(32768)
-const INTENTS = 1 | 512 | 1024 | 4096 | 8192 | 32768;
+import { addToHistory, getHistory, clearHistory } from "./messageHistory.js";
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Room helpers
+// Constants
+// ──────────────────────────────────────────────────────────────────────────────
+const SHAPE_USERNAME = "mateoia";
+const DISCORD_API    = "https://discord.com/api/v10";
+const GATEWAY_URL    = "wss://gateway.discord.gg/?v=10&encoding=json";
+
+const channelQueues = new Map<string, Promise<void>>();
+
+function queueForChannel(channelId: string, fn: () => Promise<void>): void {
+  const prev = channelQueues.get(channelId) ?? Promise.resolve();
+  const next = prev.then(() => fn()).catch(() => {});
+  channelQueues.set(channelId, next);
+  next.finally(() => {
+    if (channelQueues.get(channelId) === next) channelQueues.delete(channelId);
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Room
 // ──────────────────────────────────────────────────────────────────────────────
 async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
   const existing = loadRoom();
@@ -30,31 +45,10 @@ async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Context payload
 // ──────────────────────────────────────────────────────────────────────────────
-function sanitize(text: string): string {
-  return text.replace(/\|\|([^|]+)\|\|/g, "$1");
-}
-
-function chunks(text: string, size = 1900): string[] {
-  const out: string[] = [];
-  let s = text.trim();
-  while (s.length > size) {
-    const cut = s.lastIndexOf("\n", size);
-    const pos = cut > 0 ? cut : size;
-    out.push(s.slice(0, pos).trim());
-    s = s.slice(pos).trim();
-  }
-  if (s) out.push(s);
-  return out;
-}
-
-function buildContext(
-  location: string,
-  history: { username: string; content: string }[],
-  author: string,
-  text: string
-): string {
+function buildPayload(channelId: string, location: string, author: string, text: string): string {
+  const history = getHistory(channelId);
   const lines: string[] = [`[${location}]`];
   if (history.length > 0) {
     lines.push(`[Últimos ${history.length} mensajes:]`);
@@ -65,20 +59,50 @@ function buildContext(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Discord REST
+// Discord REST helpers
 // ──────────────────────────────────────────────────────────────────────────────
-async function sendMessage(
+function sanitizeReply(text: string): string {
+  return text.replace(/\|\|([^|]+)\|\|/g, "$1");
+}
+
+function splitByBlankLines(text: string): string[] {
+  return text
+    .split(/\n{2,}/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+async function sendTypingIndicator(token: string, channelId: string): Promise<void> {
+  await fetch(`${DISCORD_API}/channels/${channelId}/typing`, {
+    method: "POST",
+    headers: { Authorization: token, "User-Agent": "Mozilla/5.0" },
+  }).catch(() => {});
+}
+
+function startTyping(token: string, channelId: string): () => void {
+  let active = true;
+  const tick = async () => {
+    while (active) {
+      await sendTypingIndicator(token, channelId);
+      await new Promise((r) => setTimeout(r, 8000));
+    }
+  };
+  tick();
+  return () => { active = false; };
+}
+
+async function sendDiscordMessage(
   token: string,
   channelId: string,
   content: string,
-  replyToId?: string
+  replyToMessageId?: string
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
-  if (replyToId) {
-    body.message_reference = { message_id: replyToId };
-    body.allowed_mentions = { replied_user: false };
+  if (replyToMessageId) {
+    body.message_reference = { message_id: replyToMessageId };
+    body.allowed_mentions  = { replied_user: false };
   }
-  const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages`, {
+  const res = await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
     method: "POST",
     headers: {
       Authorization: token,
@@ -88,29 +112,9 @@ async function sendMessage(
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const err = await res.text().catch(() => "");
-    console.error(`[selfbot] ❌ REST error ${res.status}: ${err.slice(0, 200)}`);
+    const txt = await res.text().catch(() => "");
+    console.error(`[selfbot] Error enviando mensaje HTTP ${res.status}: ${txt.slice(0, 200)}`);
   }
-}
-
-async function sendTyping(token: string, channelId: string): Promise<void> {
-  await fetch(`https://discord.com/api/v9/channels/${channelId}/typing`, {
-    method: "POST",
-    headers: { Authorization: token, "User-Agent": "Mozilla/5.0" },
-  }).catch(() => {});
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Per-channel queue
-// ──────────────────────────────────────────────────────────────────────────────
-const queues = new Map<string, Promise<void>>();
-function enqueue(channelId: string, fn: () => Promise<void>): void {
-  const prev = queues.get(channelId) ?? Promise.resolve();
-  const next = prev
-    .then(fn)
-    .catch((e) => console.error(`[selfbot] Error en cola ${channelId}:`, e));
-  queues.set(channelId, next);
-  next.finally(() => { if (queues.get(channelId) === next) queues.delete(channelId); });
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -119,216 +123,239 @@ function enqueue(channelId: string, fn: () => Promise<void>): void {
 async function handleMessage(
   token: string,
   userId: string,
-  channelNames: Map<string, string>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   msg: any
 ): Promise<void> {
-  const rawContent: string = msg.content ?? "";
-  const channelId: string = msg.channel_id;
-  const isDM = !msg.guild_id;
-  const authorId: string = msg.author?.id ?? "";
-  const authorName: string = msg.author?.username ?? "Desconocido";
+  try {
+    const content: string = (msg.content ?? "").trim();
+    if (!content) return;
+    if (msg.author?.bot) return;
+    if (msg.author?.id === userId) return;
 
-  if (msg.author?.bot) return;
-  if (authorId === userId) return;
-  if (!rawContent.trim()) return;
+    const channelId: string = msg.channel_id;
+    const guildId: string | null = msg.guild_id ?? null;
+    const isDM = !guildId;
+    const authorName: string = msg.author?.username ?? "user";
 
-  const label = isDM ? "DM" : `#${channelNames.get(channelId) ?? channelId}`;
-  console.log(`[selfbot] 📨 ${label} de ${authorName} | "${rawContent.slice(0, 80)}"`);
+    const mentioned =
+      content.includes(`<@${userId}>`) ||
+      content.includes(`<@!${userId}>`);
 
-  const cleanText = rawContent.replace(/<@!?\d+>/g, "").trim() || rawContent.trim();
-  const lower = cleanText.toLowerCase();
+    let isReplyToMe = false;
+    if (!isDM && !mentioned && msg.referenced_message) {
+      isReplyToMe = msg.referenced_message?.author?.id === userId;
+    }
 
-  // Comandos R! siempre responden
-  if (lower === "r!ping") {
-    await sendMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
-    return;
+    const cleanText = content
+      .replace(new RegExp(`<@!?${userId}>`, "g"), "")
+      .trim();
+
+    if (!cleanText) return;
+
+    const lower = cleanText.toLowerCase();
+
+    // Comandos R! siempre responden, sin necesitar mención
+    if (lower === "r!ping") {
+      await sendDiscordMessage(token, channelId, "🏓 Pong! El bot está funcionando.", msg.id);
+      return;
+    }
+    if (lower === "r!reset" || lower === "r!reiniciar") {
+      clearHistory(channelId);
+      await sendDiscordMessage(token, channelId, "🔄 Historial reiniciado.", msg.id);
+      return;
+    }
+
+    // Registrar en historial todos los mensajes
+    addToHistory(channelId, authorName, cleanText);
+
+    if (!isDM && !mentioned && !isReplyToMe) return;
+
+    const location = isDM
+      ? `DM con ${authorName}`
+      : `Servidor: "${guildId}" | Canal: #${channelId}`;
+
+    console.log(`[selfbot] 📨 ${location} de ${authorName} | mentioned=${mentioned} reply=${isReplyToMe} dm=${isDM}`);
+
+    const payload = buildPayload(channelId, location, authorName, cleanText);
+    const stopTyping = startTyping(token, channelId);
+
+    try {
+      const { roomId, accountNum } = await ensureRoom();
+      console.log(`[selfbot] 📤 Enviando a shapes (sala ${roomId.slice(0, 8)})...`);
+      const sentAt = Date.now();
+
+      await sendShapesMessage(accountNum, roomId, payload, authorName, SHAPE_USERNAME);
+      const replies = await pollShapesReply(accountNum, roomId, sentAt);
+      stopTyping();
+
+      if (replies.length === 0) {
+        console.warn("[selfbot] ⚠️ Sin respuesta de shapes");
+        await sendDiscordMessage(token, channelId, "⚠️ Sin respuesta. Intenta de nuevo.", msg.id);
+        return;
+      }
+
+      let first = true;
+      const allReplies: string[] = [];
+
+      for (const raw of replies) {
+        const blocks = splitByBlankLines(sanitizeReply(raw));
+        const chunks = blocks.length > 0 ? blocks : [sanitizeReply(raw).trim()];
+        for (const block of chunks) {
+          if (!block) continue;
+          allReplies.push(block);
+          const parts = block.match(/.{1,2000}/gs) ?? [block];
+          for (const part of parts) {
+            await sendDiscordMessage(token, channelId, part, first ? msg.id : undefined);
+            first = false;
+          }
+          await new Promise((r) => setTimeout(r, 350));
+        }
+      }
+
+      addToHistory(channelId, SHAPE_USERNAME, allReplies.join(" ").slice(0, 300));
+    } finally {
+      stopTyping();
+    }
+  } catch (err) {
+    console.error("[selfbot] Error procesando mensaje:", err);
   }
-  if (lower === "r!reset" || lower === "r!reiniciar") {
-    clearHistory(channelId);
-    await sendMessage(token, channelId, "🔄 Historial reiniciado.", msg.id);
-    return;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Selfbot class
+// ──────────────────────────────────────────────────────────────────────────────
+class AngelSelfbot {
+  private token: string;
+  private ws: WebSocket | null = null;
+  private userId: string | null = null;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private sequence: number | null = null;
+  private stopped = false;
+
+  constructor(token: string) {
+    this.token = token;
   }
 
-  const mentioned =
-    rawContent.includes(`<@${userId}>`) ||
-    rawContent.includes(`<@!${userId}>`);
-  const isReplyToMe = msg.referenced_message?.author?.id === userId;
-  const shouldRespond = isDM || mentioned || isReplyToMe;
-
-  console.log(`[selfbot] → mentioned=${mentioned} reply=${isReplyToMe} dm=${isDM} → respond=${shouldRespond}`);
-  addToHistory(channelId, authorName, cleanText);
-  if (!shouldRespond) return;
-
-  let location: string;
-  if (isDM) {
-    location = `DM con ${authorName}`;
-  } else {
-    location = `Servidor: "${msg.guild_id}" | Canal: #${channelNames.get(channelId) ?? channelId}`;
+  start(): void {
+    this.connect();
   }
 
-  const history = getHistory(channelId);
-  const payload = buildContext(location, history.slice(0, -1), authorName, cleanText);
-
-  await sendTyping(token, channelId);
-
-  const { roomId, accountNum } = await ensureRoom();
-  console.log(`[selfbot] 📤 Enviando a shapes (sala ${roomId.slice(0, 8)})...`);
-  const sentAt = Date.now();
-
-  await sendShapesMessage(accountNum, roomId, payload, authorName, SHAPE_USERNAME);
-  console.log(`[selfbot] ⏳ Esperando respuesta...`);
-
-  const replies = await pollShapesReply(accountNum, roomId, sentAt);
-  if (replies.length === 0) {
-    console.warn(`[selfbot] ⚠️ Sin respuesta de shapes`);
-    await sendMessage(token, channelId, "⚠️ Sin respuesta. Intenta de nuevo.", msg.id);
-    return;
+  stop(): void {
+    this.stopped = true;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.ws?.close();
   }
 
-  let first = true;
-  for (const raw of replies) {
-    const text = sanitize(raw).trim();
-    if (!text) continue;
-    for (const chunk of chunks(text)) {
-      await sendMessage(token, channelId, chunk, first ? msg.id : undefined);
-      first = false;
-      await new Promise((r) => setTimeout(r, 300));
+  private connect(): void {
+    if (this.stopped) return;
+    console.log("[selfbot] Conectando al gateway de Discord...");
+    this.ws = new WebSocket(GATEWAY_URL);
+
+    this.ws.on("open", () => console.log("[selfbot] WebSocket conectado"));
+
+    this.ws.on("message", (data: WebSocket.Data) => {
+      try {
+        const payload = JSON.parse(data.toString());
+        this.handlePayload(payload);
+      } catch {}
+    });
+
+    this.ws.on("close", (code, reason) => {
+      console.warn(`[selfbot] Gateway cerrado: ${code} ${reason ?? ""}. Reconectando en 5s...`);
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      if (!this.stopped) setTimeout(() => this.connect(), 5000);
+    });
+
+    this.ws.on("error", (err) => {
+      console.error("[selfbot] WebSocket error:", err.message);
+    });
+  }
+
+  private send(payload: object): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(payload));
+    }
+  }
+
+  private identify(): void {
+    this.send({
+      op: 2,
+      d: {
+        token: this.token,
+        capabilities: 8189,
+        properties: {
+          os: "Windows",
+          browser: "Chrome",
+          device: "",
+          system_locale: "es-ES",
+          browser_user_agent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          browser_version: "120.0.0.0",
+          os_version: "10",
+          referrer: "",
+          referring_domain: "",
+          referrer_current: "",
+          referring_domain_current: "",
+          release_channel: "stable",
+          client_build_number: 0,
+          client_event_source: null,
+        },
+        presence: { status: "online", since: 0, activities: [], afk: false },
+        compress: false,
+        client_state: { guild_versions: {} },
+      },
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private handlePayload(payload: any): void {
+    const { op, d, s, t } = payload;
+    if (s !== undefined && s !== null) this.sequence = s;
+
+    switch (op) {
+      case 10: {
+        const interval: number = d.heartbeat_interval;
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = setInterval(() => {
+          this.send({ op: 1, d: this.sequence });
+        }, interval);
+        this.send({ op: 1, d: this.sequence });
+        this.identify();
+        break;
+      }
+      case 11:
+        break;
+      case 0: {
+        if (t === "READY") {
+          this.userId = d.user?.id ?? null;
+          console.log(
+            `[selfbot] ✅ Conectado como ${d.user?.username}#${d.user?.discriminator} (${this.userId})`
+          );
+        } else if (t === "MESSAGE_CREATE" && this.userId) {
+          queueForChannel(d.channel_id, () =>
+            handleMessage(this.token, this.userId!, d)
+          );
+        }
+        break;
+      }
+      case 9:
+        console.warn("[selfbot] Sesión inválida. Reconectando...");
+        setTimeout(() => this.identify(), 2000);
+        break;
     }
   }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Gateway
+// Entry point
 // ──────────────────────────────────────────────────────────────────────────────
 export function startAngelBot(): void {
   const token = process.env.ANGEL_SELFBOT_TOKEN;
   if (!token) {
-    console.error("[selfbot] ❌ ANGEL_SELFBOT_TOKEN no definido");
-    process.exit(1);
+    console.error("[selfbot] ❌ ANGEL_SELFBOT_TOKEN no definido. Selfbot desactivado.");
+    return;
   }
-
-  const GATEWAY = "wss://gateway.discord.gg/?v=9&encoding=json";
-  let ws: WebSocket;
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  let watchdog: ReturnType<typeof setTimeout> | null = null;
-  let sessionId: string | null = null;
-  let seq: number | null = null;
-  let userId = "";
-  const channelNames = new Map<string, string>();
-  let reconnectDelay = 1000;
-
-  function clearTimers() {
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-  }
-
-  function resetWatchdog() {
-    if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(() => {
-      console.warn("[selfbot] ⚠️ Watchdog: sin HELLO/HEARTBEAT_ACK — reconectando");
-      ws.terminate();
-    }, 90_000);
-  }
-
-  function connect(resume = false) {
-    console.log(`[selfbot] 🔌 Conectando${resume ? " (resume)" : ""}...`);
-    ws = new WebSocket(GATEWAY);
-
-    ws.on("open", () => {
-      console.log("[selfbot] WebSocket abierto");
-      resetWatchdog();
-    });
-
-    ws.on("message", (data: WebSocket.RawData) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let payload: any;
-      try { payload = JSON.parse(data.toString()); } catch { return; }
-
-      const { op, d, s, t } = payload;
-      if (s != null) seq = s;
-
-      switch (op) {
-        case 10: { // HELLO
-          const interval = d.heartbeat_interval;
-          const jitter = Math.random() * interval;
-          console.log(`[selfbot] 💓 Heartbeat cada ${interval}ms (jitter ${Math.round(jitter)}ms)`);
-          setTimeout(() => {
-            ws.send(JSON.stringify({ op: 1, d: seq }));
-            heartbeatTimer = setInterval(() => {
-              ws.send(JSON.stringify({ op: 1, d: seq }));
-            }, interval);
-          }, jitter);
-
-          if (resume && sessionId) {
-            console.log("[selfbot] 🔄 Resumiendo sesión...");
-            ws.send(JSON.stringify({
-              op: 6,
-              d: { token, session_id: sessionId, seq },
-            }));
-          } else {
-            ws.send(JSON.stringify({
-              op: 2,
-              d: {
-                token,
-                intents: INTENTS,
-                properties: { os: "linux", browser: "chrome", device: "chrome" },
-                presence: { status: "online", afk: false },
-              },
-            }));
-          }
-          resetWatchdog();
-          break;
-        }
-        case 11: // HEARTBEAT_ACK
-          resetWatchdog();
-          break;
-        case 1: // HEARTBEAT request
-          ws.send(JSON.stringify({ op: 1, d: seq }));
-          break;
-        case 7: // RECONNECT
-          console.log("[selfbot] 🔁 Gateway pidió reconexión");
-          ws.close();
-          break;
-        case 9: // INVALID SESSION
-          console.log(`[selfbot] ⚠️ Sesión inválida (resumable=${d}) — reiniciando`);
-          sessionId = null;
-          seq = null;
-          ws.close();
-          break;
-        case 0: { // DISPATCH
-          if (t === "READY") {
-            userId = d.user.id;
-            sessionId = d.session_id;
-            reconnectDelay = 1000;
-            console.log(`[selfbot] ✅ Conectado como ${d.user.username}#${d.user.discriminator} (${userId})`);
-          } else if (t === "CHANNEL_CREATE" || t === "CHANNEL_UPDATE") {
-            if (d.name) channelNames.set(d.id, d.name);
-          } else if (t === "GUILD_CREATE") {
-            for (const ch of d.channels ?? []) {
-              if (ch.name) channelNames.set(ch.id, ch.name);
-            }
-          } else if (t === "MESSAGE_CREATE") {
-            enqueue(d.channel_id, () => handleMessage(token!, userId, channelNames, d));
-          }
-          break;
-        }
-      }
-    });
-
-    ws.on("close", (code, reason) => {
-      clearTimers();
-      console.log(`[selfbot] ❌ Desconectado (${code} ${reason ?? ""})`);
-      const canResume = code !== 1000 && sessionId != null;
-      setTimeout(() => connect(canResume), reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
-    });
-
-    ws.on("error", (err) => {
-      console.error("[selfbot] WebSocket error:", err.message);
-    });
-  }
-
-  connect(false);
-  console.log(`[selfbot] 🐊 Iniciando con shape ${SHAPE_USERNAME}...`);
+  const bot = new AngelSelfbot(token);
+  bot.start();
+  console.log("[selfbot] 🐊 Selfbot de Mateoia iniciado");
 }
