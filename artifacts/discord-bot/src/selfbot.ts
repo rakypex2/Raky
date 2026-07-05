@@ -12,7 +12,9 @@ const channelQueues = new Map<string, Promise<void>>();
 
 function queueForChannel(channelId: string, fn: () => Promise<void>): void {
   const prev = channelQueues.get(channelId) ?? Promise.resolve();
-  const next = prev.then(() => fn()).catch(() => {});
+  const next = prev.then(() => fn()).catch((err) => {
+    console.error(`[selfbot] Error en cola del canal ${channelId}:`, err);
+  });
   channelQueues.set(channelId, next);
   next.finally(() => {
     if (channelQueues.get(channelId) === next) channelQueues.delete(channelId);
@@ -38,7 +40,10 @@ function splitIntoChunks(text: string, size = 1900): string[] {
 
 async function ensureRoom(): Promise<{ roomId: string; accountNum: number }> {
   const existing = loadRoom();
-  if (existing) return existing;
+  if (existing) {
+    console.log(`[selfbot] Usando sala existente: ${existing.roomId}`);
+    return existing;
+  }
 
   console.log(`[selfbot] Creando sala única para ${SHAPE_USERNAME}...`);
   const info = await getAnyWorkingAccount();
@@ -96,6 +101,8 @@ async function sendDiscordMessage(
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     console.error(`[selfbot] Error enviando mensaje HTTP ${res.status}: ${txt.slice(0, 200)}`);
+  } else {
+    console.log(`[selfbot] ✅ Mensaje enviado al canal ${channelId}`);
   }
 }
 
@@ -130,21 +137,27 @@ async function handleMessage(
 ): Promise<void> {
   try {
     const rawContent: string = (msg.content ?? "").trim();
-    if (!rawContent) return;
-    if (msg.author?.bot) return;
-    if (msg.author?.id === userId) return;
-
+    const authorName = msg.author?.username ?? "usuario";
     const channelId: string = msg.channel_id;
     const guildId: string | null = msg.guild_id ?? null;
     const isDM = !guildId;
 
+    // Filtrar bots y mensajes propios
+    if (msg.author?.bot) return;
+    if (msg.author?.id === userId) return;
+    if (!rawContent) return;
+
     const mentioned = rawContent.includes(`<@${userId}>`) || rawContent.includes(`<@!${userId}>`);
     let isReplyToMe = false;
-    if (!isDM && !mentioned && msg.referenced_message) {
+    if (msg.referenced_message) {
       isReplyToMe = msg.referenced_message?.author?.id === userId;
     }
-
     const shouldRespond = isDM || mentioned || isReplyToMe;
+
+    console.log(
+      `[selfbot] 📨 Mensaje de ${authorName} en ${isDM ? "DM" : `#${channelCache.get(channelId) ?? channelId}`}` +
+      ` | mencionado=${mentioned} replyToMe=${isReplyToMe} DM=${isDM} → responder=${shouldRespond}`
+    );
 
     const cleanText = rawContent
       .replace(new RegExp(`<@!?${userId}>`, "g"), "")
@@ -152,7 +165,7 @@ async function handleMessage(
 
     if (!cleanText) return;
 
-    addToHistory(channelId, msg.author?.username ?? "usuario", cleanText);
+    addToHistory(channelId, authorName, cleanText);
 
     if (!shouldRespond) return;
 
@@ -164,7 +177,7 @@ async function handleMessage(
 
     let locationLine: string;
     if (isDM) {
-      locationLine = `Mensaje Directo con ${msg.author?.username ?? "usuario"}`;
+      locationLine = `Mensaje Directo con ${authorName}`;
     } else {
       const guildName = guildCache.get(guildId!) ?? `Servidor ${guildId}`;
       const channelName = channelCache.get(channelId) ?? `canal-${channelId}`;
@@ -175,24 +188,30 @@ async function handleMessage(
     const contextPayload = buildContextMessage(
       locationLine,
       history.slice(0, -1),
-      msg.author?.username ?? "usuario",
+      authorName,
       cleanText
     );
+
+    console.log(`[selfbot] 📤 Enviando a shapes (sala: ${(await ensureRoom()).roomId.slice(0, 8)}...)...`);
 
     const stopTyping = startTyping(token, channelId);
     try {
       const { roomId, accountNum } = await ensureRoom();
       const sentAt = Date.now();
 
-      await sendShapesMessage(accountNum, roomId, contextPayload, msg.author?.username ?? "usuario", SHAPE_USERNAME);
-      const replies = await pollShapesReply(accountNum, roomId, sentAt);
+      await sendShapesMessage(accountNum, roomId, contextPayload, authorName, SHAPE_USERNAME);
+      console.log(`[selfbot] ⏳ Esperando respuesta de shapes...`);
 
+      const replies = await pollShapesReply(accountNum, roomId, sentAt);
       stopTyping();
 
       if (replies.length === 0) {
+        console.warn(`[selfbot] ⚠️ No llegó respuesta de shapes para mensaje de ${authorName}`);
         await sendDiscordMessage(token, channelId, "⚠️ Sin respuesta. Intenta de nuevo.", msg.id);
         return;
       }
+
+      console.log(`[selfbot] 💬 Recibidas ${replies.length} respuestas de shapes`);
 
       let first = true;
       for (const raw of replies) {
@@ -209,7 +228,7 @@ async function handleMessage(
       stopTyping();
     }
   } catch (err) {
-    console.error("[selfbot] Error procesando mensaje:", err);
+    console.error("[selfbot] ❌ Error procesando mensaje:", err);
   }
 }
 
@@ -252,7 +271,7 @@ export class AngelSelfbot {
     });
 
     this.ws.on("close", (code, reason) => {
-      console.warn(`[selfbot] Gateway cerrado: ${code} ${reason}. Reconectando en 5s...`);
+      console.warn(`[selfbot] Gateway cerrado: código=${code} razón=${reason}. Reconectando en 5s...`);
       if (this.heartbeat) clearInterval(this.heartbeat);
       if (!this.stopped) setTimeout(() => this.connect(), 5000);
     });
@@ -321,14 +340,18 @@ export class AngelSelfbot {
           console.log(
             `[selfbot] ✅ Conectado como ${d.user?.username}#${d.user?.discriminator} (${this.userId})`
           );
-
           const guilds: any[] = d.guilds ?? [];
+          let totalChannels = 0;
           for (const g of guilds) {
             if (g.id && g.name) this.guildCache.set(g.id, g.name);
             for (const ch of g.channels ?? []) {
-              if (ch.id && ch.name) this.channelCache.set(ch.id, ch.name);
+              if (ch.id && ch.name) {
+                this.channelCache.set(ch.id, ch.name);
+                totalChannels++;
+              }
             }
           }
+          console.log(`[selfbot] 📋 Cacheados ${guilds.length} servidores y ${totalChannels} canales`);
         } else if (t === "GUILD_CREATE") {
           if (d.id && d.name) this.guildCache.set(d.id, d.name);
           for (const ch of d.channels ?? []) {
@@ -336,7 +359,11 @@ export class AngelSelfbot {
           }
         } else if (t === "CHANNEL_CREATE" || t === "CHANNEL_UPDATE") {
           if (d.id && d.name) this.channelCache.set(d.id, d.name);
-        } else if (t === "MESSAGE_CREATE" && this.userId) {
+        } else if (t === "MESSAGE_CREATE") {
+          if (!this.userId) {
+            console.warn("[selfbot] MESSAGE_CREATE recibido antes de READY, ignorando");
+            return;
+          }
           queueForChannel(d.channel_id, () =>
             handleMessage(this.token, this.userId!, d, this.guildCache, this.channelCache)
           );
@@ -346,6 +373,8 @@ export class AngelSelfbot {
       case 9:
         console.warn("[selfbot] Sesión inválida. Reconectando...");
         setTimeout(() => this.identify(), 2000);
+        break;
+      default:
         break;
     }
   }
@@ -359,5 +388,5 @@ export function startAngelBot(): void {
   }
   const bot = new AngelSelfbot(token);
   bot.start();
-  console.log("[selfbot] 😇 Mateo iniciado con shape mateoia");
+  console.log(`[selfbot] 😇 Mateo iniciado con shape ${SHAPE_USERNAME}`);
 }
