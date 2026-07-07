@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { startAngelBot } from "./selfbot.js";
 import { startTelegram } from "./telegram.js";
+import { startTelegramLyrics } from "./telegram-lyrics.js";
 
 const PORT = process.env.PORT ?? "8080";
 
@@ -18,3 +19,4 @@ process.on("uncaughtException", (err) => console.error("[uncaughtException]", er
 
 startAngelBot();
 startTelegram();
+startTelegramLyrics();
