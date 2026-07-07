@@ -7,6 +7,9 @@ import { addToHistory, getHistory } from "./messageHistory.js";
 
 const SHAPE_USERNAME = "mateoia";
 
+/** Solo este usuario de Telegram puede interactuar con el bot (en minúsculas) */
+const ALLOWED_TELEGRAM_USERS = ["rakykxd"];
+
 function sanitize(text: string): string {
   return text.replace(/\|\|([^|]+)\|\|/g, "$1");
 }
@@ -83,6 +86,12 @@ export function startTelegram(): void {
     const chatId = String(ctx.chat.id);
     const text = ctx.message.text?.trim() ?? "";
     if (!text) return;
+
+    const senderUsername = (ctx.from?.username ?? "").toLowerCase();
+    if (!ALLOWED_TELEGRAM_USERS.includes(senderUsername)) {
+      console.log(`[telegram] 🚫 Mensaje ignorado de usuario no permitido: ${ctx.from?.username}`);
+      return;
+    }
 
     const isDM = ctx.chat.type === "private";
     const botInfo = ctx.botInfo;

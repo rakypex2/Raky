@@ -15,6 +15,9 @@ const SHAPE_USERNAME = "mateoia";
 const DISCORD_API    = "https://discord.com/api/v10";
 const GATEWAY_URL    = "wss://gateway.discord.gg/?v=10&encoding=json";
 
+/** Solo estos usuarios de Discord pueden interactuar con el bot (en minúsculas) */
+const ALLOWED_DISCORD_USERS = ["r_aky"];
+
 const channelQueues = new Map<string, Promise<void>>();
 
 function queueForChannel(channelId: string, fn: () => Promise<void>): void {
@@ -160,6 +163,10 @@ async function handleMessage(
     if (!content) return;
     if (msg.author?.bot) return;
     if (msg.author?.id === userId) return;
+    if (!ALLOWED_DISCORD_USERS.includes((msg.author?.username ?? "").toLowerCase())) {
+      console.log(`[selfbot] 🚫 Mensaje ignorado de usuario no permitido: ${msg.author?.username}`);
+      return;
+    }
 
     const channelId: string = msg.channel_id;
     const guildId: string | null = msg.guild_id ?? null;
